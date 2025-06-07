@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sync/atomic"
 	"time"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -26,6 +27,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -58,10 +60,11 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		Password string `json:"password"`
 	}
 	type response struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		ID          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	var req request
@@ -87,10 +90,11 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	resp := response{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		Email:     user.Email,
+		ID:          user.ID.String(),
+		CreatedAt:   user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:   user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -246,6 +250,7 @@ type response struct {
 		Email        string `json:"email"`
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	var req request
@@ -294,6 +299,7 @@ type response struct {
 		Email:        user.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  user.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -349,10 +355,11 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 		Password string `json:"password"`
 	}
 	type response struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
+		ID          string `json:"id"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		Email       string `json:"email"`
+		IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	tokenStr, err := auth.GetBearerToken(r.Header)
@@ -396,10 +403,11 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	resp := response{
-		ID:        updatedUser.ID.String(),
-		CreatedAt: updatedUser.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: updatedUser.UpdatedAt.Format(time.RFC3339),
-		Email:     updatedUser.Email,
+		ID:          updatedUser.ID.String(),
+		CreatedAt:   updatedUser.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   updatedUser.UpdatedAt.Format(time.RFC3339),
+		Email:       updatedUser.Email,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -447,6 +455,57 @@ func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type PolkaWebhookRequest struct {
+	Event string `json:"event"`
+	Data  struct {
+		UserID string `json:"user_id"`
+	} `json:"data"`
+}
+
+func (cfg *apiConfig) handlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polkaKey {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req PolkaWebhookRequest
+	err = json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent) // 204 No Content
+		return
+	}
+
+	userID, err := uuid.Parse(req.Data.UserID)
+	if err != nil {
+		http.Error(w, "Invalid user_id", http.StatusBadRequest)
+		return
+	}
+
+	err = cfg.db.UpgradeUserToChirpyRed(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = cfg.db.GetUserByID(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 
 func main() {
 	err := godotenv.Load()
@@ -469,10 +528,16 @@ func main() {
 		log.Fatal("JWT_SECRET not set in .env")
 	}
 
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY not set in .env")
+	}
+
 	apiCfg := apiConfig{
 		db:        dbQueries,
 		platform:  platform,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	mux := http.NewServeMux()
@@ -494,7 +559,7 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 	mux.HandleFunc("PUT /api/users", apiCfg.handlerUpdateUser)
 	mux.HandleFunc("DELETE /api/chirps/", apiCfg.handlerDeleteChirp)
-
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlePolkaWebhook)
 
 	server := &http.Server{
 		Addr:    ":8080",
