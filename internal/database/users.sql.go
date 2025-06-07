@@ -7,6 +7,9 @@ package database
 
 import (
 	"context"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 const createUser = `-- name: CreateUser :one
@@ -48,6 +51,15 @@ func (q *Queries) DeleteAllUsers(ctx context.Context) error {
 	return err
 }
 
+const deleteChirp = `-- name: DeleteChirp :exec
+DELETE FROM chirps WHERE id = $1
+`
+
+func (q *Queries) DeleteChirp(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, deleteChirp, id)
+	return err
+}
+
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, created_at, updated_at, email, hashed_password FROM users
 WHERE email = $1
@@ -62,6 +74,46 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const updateUser = `-- name: UpdateUser :one
+UPDATE users
+SET email = $2, hashed_password = $3, updated_at = $4
+WHERE id = $1
+RETURNING id, email, hashed_password, created_at, updated_at
+`
+
+type UpdateUserParams struct {
+	ID             uuid.UUID
+	Email          string
+	HashedPassword string
+	UpdatedAt      time.Time
+}
+
+type UpdateUserRow struct {
+	ID             uuid.UUID
+	Email          string
+	HashedPassword string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (UpdateUserRow, error) {
+	row := q.db.QueryRowContext(ctx, updateUser,
+		arg.ID,
+		arg.Email,
+		arg.HashedPassword,
+		arg.UpdatedAt,
+	)
+	var i UpdateUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.HashedPassword,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

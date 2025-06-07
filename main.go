@@ -343,6 +343,111 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	type response struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	tokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		http.Error(w, "Missing or invalid Authorization header", http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenStr, cfg.jwtSecret)
+	if err != nil {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	var req request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Email == "" || req.Password == "" {
+		http.Error(w, "Email and password are required", http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+		return
+	}
+
+	updatedUser, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
+		UpdatedAt:      time.Now(),
+	})
+	if err != nil {
+		http.Error(w, "Failed to update user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := response{
+		ID:        updatedUser.ID.String(),
+		CreatedAt: updatedUser.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: updatedUser.UpdatedAt.Format(time.RFC3339),
+		Email:     updatedUser.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpIDStr := r.URL.Path[len("/api/chirps/"):]
+	chirpID, err := uuid.Parse(chirpIDStr)
+	if err != nil {
+		http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+		return
+	}
+
+	tokenStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		http.Error(w, "Missing or invalid Authorization header", http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenStr, cfg.jwtSecret)
+	if err != nil {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		http.Error(w, "Chirp not found", http.StatusNotFound)
+		return
+	}
+
+	if chirp.UserID != userID {
+		http.Error(w, "Forbidden: You are not the author of this chirp", http.StatusForbidden)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), chirpID)
+	if err != nil {
+		http.Error(w, "Failed to delete chirp", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -387,6 +492,9 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
+	mux.HandleFunc("PUT /api/users", apiCfg.handlerUpdateUser)
+	mux.HandleFunc("DELETE /api/chirps/", apiCfg.handlerDeleteChirp)
+
 
 	server := &http.Server{
 		Addr:    ":8080",
