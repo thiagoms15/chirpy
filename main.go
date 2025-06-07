@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 	"errors"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -194,21 +195,49 @@ type chirpResponse struct {
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+    ctx := r.Context()
+    q := r.URL.Query()
+    authorIDStr := q.Get("author_id")
+    sortOrder := q.Get("sort")
 
-	chirps, err := cfg.db.GetChirps(ctx)
-	if err != nil {
-		http.Error(w, "Could not fetch chirps", http.StatusInternalServerError)
-		return
-	}
+    var authorID uuid.UUID
+    var chirps []database.Chirp
+    var err error
 
-	var res []chirpResponse
-	for _, c := range chirps {
-		res = append(res, chirpResponse(c))
-	}
+    if authorIDStr != "" {
+        uid, err := uuid.Parse(authorIDStr)
+        if err != nil {
+            http.Error(w, "Invalid author_id", http.StatusBadRequest)
+            return
+        }
+        authorID = uid
+        chirps, err = cfg.db.GetChirpsByAuthor(ctx, authorID)
+    } else {
+        chirps, err = cfg.db.GetChirps(ctx)
+    }
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
+    if err != nil {
+        http.Error(w, "Could not fetch chirps", http.StatusInternalServerError)
+        return
+    }
+
+    if sortOrder == "desc" {
+        sort.Slice(chirps, func(i, j int) bool {
+            return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+        })
+    } else {
+        sort.Slice(chirps, func(i, j int) bool {
+            return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+        })
+    }
+
+    var res []chirpResponse
+    for _, c := range chirps {
+        res = append(res, chirpResponse(c))
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(res)
 }
 
 func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
